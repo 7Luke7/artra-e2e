@@ -66,4 +66,9 @@ The stack is up.
   Recordings          ./videos/<session-id>/<test-name>.mp4  (with record=)
 
   Stop everything     docker compose down
+
+Note: the database volume survives \`docker compose down\`, which is what keeps
+the stack warm between runs. If you regenerate .env, drop it as well -
+\`docker compose down -v\` - because POSTGRES_PASSWORD is only applied when the
+volume is first created.
 EOF

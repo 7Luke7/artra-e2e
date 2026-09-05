@@ -60,7 +60,14 @@ generate_grid_config "$BROWSERS" "$PARALLELISM"
 export BROWSERS RECORD_VIDEO="$RECORD" PARALLELISM
 
 echo "Starting the stack (this builds the application image on first run)..."
-docker compose down --remove-orphans > /dev/null 2>&1 || true
+# --volumes matters. Every run starts from a freshly initialised database, so a
+# run cannot inherit rows from the last one - and, less obviously, so that a
+# regenerated .env still works: POSTGRES_PASSWORD is only applied when the
+# volume is first created, so a new password against an old volume fails
+# authentication in a way that looks like a broken application. Re-initialising
+# costs a couple of seconds; the schema and fixtures are small.
+docker compose down --remove-orphans --volumes > /dev/null 2>&1 || true
+reap_grid_containers > /dev/null 2>&1 || true
 
 # shellcheck disable=SC2086
 if ! docker compose up -d --build $STACK_SERVICES; then
