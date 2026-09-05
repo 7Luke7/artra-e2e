@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <charset>UTF-8</charset>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{28} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- One rolling file per run, archived by run.sh into runs/<timestamp>/logs
+         and uploaded as a CI artifact. This is the first thing to read when a
+         test fails: it carries the page/step trace that led to the failure. -->
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>target/logs/e2e.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>target/logs/e2e.%d{yyyy-MM-dd}.log</fileNamePattern>
+            <maxHistory>7</maxHistory>
+        </rollingPolicy>
+        <encoder>
+            <charset>UTF-8</charset>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{28} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDOUT"/>
+        <appender-ref ref="FILE"/>
+    </root>
+
+    <!-- Selenium's own wire logging is far too chatty to leave on. -->
+    <logger name="org.openqa.selenium" level="WARN"/>
+    <logger name="io.netty" level="WARN"/>
+    <logger name="org.asynchttpclient" level="WARN"/>
+
+</configuration>

@@ -1,0 +1,7 @@
+node_modules
+.output
+.vinxi
+.git
+app.config.timestamp_*.js
+.env
+.env.*

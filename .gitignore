@@ -1,0 +1,27 @@
+# Build output
+target/
+
+# Run artifacts: reports, screenshots and logs are archived here per run
+runs/
+
+# Generated per machine by scripts/prepare-env.sh. Holds the throwaway
+# secrets the local stack keys its hashes with - never committed.
+# .env.example is the tracked template.
+.env
+*.local
+
+# TLS material for the local stack, issued per machine by
+# scripts/prepare-certs.sh. Never committed - a checked-in private key is a
+# checked-in private key even when it only protects a .test hostname.
+stack/caddy/certs/
+
+# Staged copy of the application under test (see scripts/prepare-app.sh)
+.artra-build/
+.artra-src/
+
+# Editors / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

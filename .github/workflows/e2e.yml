@@ -1,0 +1,173 @@
+name: E2E
+
+# Fast feedback on every push and pull request, plus a manual button for a
+# targeted run (one browser, one tag) that needs no edit to this file.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      browsers:
+        description: "Browsers to run, comma-separated"
+        default: "chrome,firefox,edge"
+        type: string
+      tags:
+        description: "JUnit @Tag values to run, e.g. smoke,auth (empty runs everything)"
+        default: ""
+        type: string
+
+# A new push supersedes the run already in flight for the same branch: a full
+# matrix takes several minutes, and finishing one for a commit that has already
+# been replaced helps nobody.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The application under test lives in its own repository. The suite stages it
+  # at build time - see scripts/prepare-app.sh.
+  ARTRA_REPOSITORY: 7Luke7/Artraa
+  ARTRA_REF: main
+
+jobs:
+
+  # Compiles the suite and runs the unit tests that guard the framework itself.
+  # Seconds rather than minutes, so a typo never costs a full browser matrix to
+  # discover.
+  build:
+    name: Build and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+
+      # -DskipITs on purpose: the integration tests need the whole stack, which
+      # the next job brings up. This step exists to fail fast on anything that
+      # does not compile, and on a broken framework helper.
+      - name: Compile and run unit tests
+        run: mvn -B verify -DskipITs
+
+      - name: Upload unit test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: target/surefire-reports/
+          if-no-files-found: ignore
+
+  # Turns the browser list into the matrix.
+  #
+  # A separate job because GitHub's expression language has no way to split a
+  # string - so the comma-separated input has to become JSON in a shell step
+  # before `strategy.matrix` can consume it.
+  plan:
+    name: Resolve browser matrix
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      browsers: ${{ steps.resolve.outputs.browsers }}
+    steps:
+      - id: resolve
+        env:
+          # Empty on push and pull_request, which is what selects the default.
+          REQUESTED: ${{ inputs.browsers }}
+        run: |
+          list="${REQUESTED:-chrome,firefox,edge}"
+          json=$(printf '%s' "$list" | tr -d '[:space:]' \
+            | awk -F, '{printf "["; for (i = 1; i <= NF; i++) if ($i != "") printf "%s\"%s\"", (i > 1 ? "," : ""), $i; printf "]"}')
+          echo "Matrix: $json"
+          echo "browsers=$json" >> "$GITHUB_OUTPUT"
+
+  # One job per browser. Each brings up its own stack - application, database,
+  # Redis, mail server, Selenium Grid and a single browser node - runs the whole
+  # suite against it, and uploads everything a failure needs.
+  #
+  # A matrix rather than one job running all three: a browser-specific failure
+  # is then a red square with the browser's name on it, and the three run
+  # concurrently instead of end to end.
+  e2e:
+    name: E2E (${{ matrix.browser }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # Chrome failing tells you nothing about Firefox. Finish the whole matrix.
+      fail-fast: false
+      matrix:
+        browser: ${{ fromJSON(needs.plan.outputs.browsers) }}
+
+    steps:
+      - name: Check out the test suite
+        uses: actions/checkout@v4
+
+      - name: Check out the application under test
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ARTRA_REPOSITORY }}
+          ref: ${{ env.ARTRA_REF }}
+          path: .artra-src
+
+      - name: Show the environment
+        run: |
+          docker --version
+          docker compose version
+          echo "Browser: ${{ matrix.browser }}"
+
+      # No secrets are configured for this job, and none are needed: the stack
+      # generates its own throwaway keys (scripts/prepare-env.sh) and captures
+      # every email in a disposable mail server rather than sending any. That is
+      # deliberate - a pull request from a fork can run the full suite without
+      # ever being handed a credential. See docs/EMAIL.md.
+      #
+      # run.sh exits with Maven's exit code, so a failed test fails this step,
+      # this job and the pipeline.
+      - name: Run the suite
+        env:
+          ARTRA_PATH: ${{ github.workspace }}/.artra-src
+          TAGS: ${{ inputs.tags }}
+        run: |
+          if [ -n "$TAGS" ]; then
+            ./run.sh browsers=${{ matrix.browser }} sessions=2 tags="$TAGS"
+          else
+            ./run.sh browsers=${{ matrix.browser }} sessions=2
+          fi
+
+      # always(): a failed run is exactly when these are worth having.
+      - name: Upload test results and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.browser }}
+          path: runs/
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Only on failure, and separate from the results above: this is where an
+      # infrastructure problem shows up, as opposed to a test problem.
+      - name: Collect container logs
+        if: failure()
+        run: |
+          mkdir -p container-logs
+          docker compose logs --no-color --timestamps > container-logs/compose.log 2>&1 || true
+
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-logs-${{ matrix.browser }}
+          path: container-logs/
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --remove-orphans --volumes || true
