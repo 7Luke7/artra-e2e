@@ -3,8 +3,8 @@
 End-to-end test automation for **Artra**, an online course platform.
 
 The suite drives real browsers against a real, fully containerised instance of
-the application — its database, cache, mail server and HTTPS front end included
-— and covers the journeys that matter to the business: registering, signing in
+the application — its database, cache and mail server included — and covers
+the journeys that matter to the business: registering, signing in
 through an emailed verification code, recovering a forgotten password, browsing
 and filtering the catalogue, and managing an account.
 
@@ -61,9 +61,11 @@ Two things about it shape the tests more than anything else:
    enough — the application parks a pending verification in Redis and requires
    either an emailed six-digit code or an approval pushed to an already-trusted
    device. Any test that needs a signed-in session has to go through a mailbox.
-2. **Session and verification cookies are marked `Secure`.** A browser drops
-   those over plain HTTP on any host that is not `localhost`, and a browser in a
-   container never is. The stack therefore serves the application over HTTPS.
+2. **Session and verification cookies are marked `Secure`.** A browser only
+   stores those from an origin it considers trustworthy — HTTPS, or localhost —
+   and a browser in a container reaching the app by its network address is
+   neither. Each browser is therefore explicitly told to trust that one origin;
+   see [Architecture](#architecture).
 
 Both are handled by the environment rather than worked around in the tests —
 see [Architecture](#architecture).
@@ -89,48 +91,60 @@ name and its failure message what it is protecting.
 | Configuration        | Owner (typed config merged from env → system properties → `test.properties`) |
 | Logging              | SLF4J + Logback (console and file) |
 | Fixtures / assertions| PostgreSQL JDBC driver, Jackson (Mailpit's REST API) |
-| Environment          | Docker Compose — app, PostgreSQL, Redis, Mailpit, Caddy, Selenium Grid |
+| Environment          | Docker Compose — app, PostgreSQL, Redis, Mailpit, Selenium Dynamic Grid |
 | CI                   | GitHub Actions (browser matrix, artifacts, job summary) |
 
 ## Architecture
 
 ```
-                       docker compose
-  ┌───────────────────────────────────────────────────────────────────┐
-  │                                                                   │
-  │   runner  ────────►  selenium-hub  ────►  chrome  ┐               │
-  │   (JUnit 5,          (Grid 4.43)          firefox ├─┐             │
-  │    Selenium)                              edge    ┘ │             │
-  │      │                                              │ HTTPS       │
-  │      │ JDBC (fixtures)                              ▼             │
-  │      │ HTTP  (test inbox)                        caddy            │
-  │      │                                        (artra.test)        │
-  │      │                                             │              │
-  │      │                                             ▼              │
-  │      │                                          artra             │
-  │      │                                    (SolidStart, :3000)     │
-  │      │                                             │              │
-  │      ├──────────────┬──────────────────────────────┤              │
-  │      ▼              ▼                              ▼              │
-  │  postgres        mailpit                        redis             │
-  │                                                                   │
-  └───────────────────────────────────────────────────────────────────┘
+                              docker compose
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                                                                      │
+  │   runner  ──────►  standalone-docker  ── docker.sock ──┐             │
+  │   (JUnit 5,        (Selenium Grid 4.43)                │             │
+  │    Selenium)                                           │ starts one  │
+  │      │                                                 │ container   │
+  │      │ JDBC (fixtures)                                 ▼ per session │
+  │      │ HTTP  (test inbox)                    chrome / firefox / edge │
+  │      │                                          (+ video recorder)   │
+  │      │                                                 │             │
+  │      │                                                 ▼             │
+  │      │                                    artra  172.19.0.9:3000     │
+  │      │                                         (SolidStart)          │
+  │      │                                                 │             │
+  │      ├──────────────┬──────────────────────────────────┤             │
+  │      ▼              ▼                                  ▼             │
+  │  postgres        mailpit                            redis            │
+  │                                                                      │
+  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Every arrow is a service name on one Docker bridge network, which is why the
-same commands work identically on a laptop and on a CI runner.
+Every box is a container on one bridge network, `artra-net`, pinned to
+`172.19.0.0/16`. The same commands work identically on a laptop and on a CI
+runner.
 
-Three decisions are worth calling out, because they are the ones that make the
+Three decisions are worth calling out, because they are what make the
 environment work at all:
 
-**HTTPS is not optional.** `scripts/prepare-certs.sh` issues a small CA and a
-leaf certificate for `artra.test` before the stack starts. Caddy serves it; the
-browsers accept it via the W3C-standard `acceptInsecureCerts` capability (which
-behaves the same on all three, unlike Chrome's
-`--unsafely-treat-insecure-origin-as-secure`); and the application container
-trusts the CA through `NODE_EXTRA_CA_CERTS`, because Artra fetches its own API
-over the public URL while server-rendering the catalogue. Without that last
-part the catalogue silently renders its empty state.
+**The grid starts browsers on demand.** `standalone-docker` runs no browser
+itself. For each session it creates a container from the images in
+`config.generated.toml`, attaches it to `artra-net`, and removes it when the
+session ends — which is why the grid needs the Docker socket, and why a
+Chrome-only run costs nothing for Firefox and Edge. The browsers land on the
+same network as the application, so they can reach it directly.
+
+**The application has a fixed address, and every browser is told to trust it.**
+Artra is served at `http://172.19.0.9:3000` — pinned in `docker-compose.yml`,
+because the address is also baked into the client bundle at build time. It is
+plain HTTP, and Artra marks its session and verification cookies `Secure`,
+which a browser will only store from an origin it considers *potentially
+trustworthy*. Left alone, every cookie the app sets would be discarded
+silently: no error, no console warning, just a sign-in that never sticks.
+`DriverFactory` therefore declares that exact origin trustworthy to each
+engine — `--unsafely-treat-insecure-origin-as-secure` plus a profile directory
+on Chrome and Edge, the `dom.securecontext.allowlist` preference on Firefox —
+derived from `TEST_BASE_URL`, so changing the address cannot leave the setting
+pointing at the old one.
 
 **Email is captured, never sent.** The application's email provider is selected
 by `EMAIL_PROVIDER`: `resend` in production, `smtp` in the test stack, pointed
@@ -142,7 +156,7 @@ end without an external provider, a real mailbox, or any credential. See
 **The application under test is staged, not vendored.** Artra lives in its own
 repository. `scripts/prepare-app.sh` copies a local checkout (or clones a fresh
 one) into `.artra-build/` and adds this repository's Dockerfile, so the
-application repository is never modified to be testable.
+application repository is never modified just to be testable.
 
 ## Test strategy
 
@@ -238,17 +252,18 @@ artra-e2e/
 ├── Dockerfile                 the test runner image (JDK 25 + Maven + the suite)
 ├── pom.xml
 │
-├── lib/stack-env.sh           browser validation and machine sizing
+├── config.toml                Dynamic Grid template; the scripts generate
+│                              config.generated.toml from it per run
+├── lib/stack-env.sh           browser validation, machine sizing, grid config,
+│                              video ownership and archiving
 ├── scripts/
 │   ├── prepare-env.sh         generates .env on first run (no committed secrets)
-│   ├── prepare-certs.sh       issues the CA and the artra.test certificate
 │   ├── prepare-app.sh         stages the application under test
 │   └── summarise.sh           turns the Failsafe XML into a readable summary
 │
 ├── stack/
 │   ├── app/Dockerfile         builds Artra for testing
 │   ├── app/seed-users.mjs     gives the seeded accounts a password (Argon2id)
-│   ├── caddy/Caddyfile        HTTPS front end
 │   └── db/init/               01-schema.sql, 02-seed.sql
 │
 ├── src/test/java/com/artra/e2e/
@@ -271,6 +286,7 @@ artra-e2e/
 ```bash
 ./run.sh                                     # chrome, headless
 ./run.sh browsers=chrome,firefox,edge        # the full matrix
+./run.sh browsers=chrome record=chrome       # record the sessions to video
 ./run.sh tags=smoke                          # one tag
 ./run.sh test=CourseCatalogueIT              # one class
 ./run.sh sessions=4                          # override the auto-sized parallelism
@@ -284,7 +300,7 @@ and the pipeline, exactly when the tests fail.
 ### Writing or debugging tests
 
 ```bash
-./dev.sh browsers=chrome headed=chrome
+./dev.sh browsers=chrome record=chrome
 ```
 
 This leaves the environment running and gives you a fast loop. `src/` is
@@ -303,12 +319,14 @@ While it runs:
 
 | | |
 |---|---|
-| Grid console | <http://localhost:4444> |
-| Watch a browser (noVNC, password `secret`) | <http://localhost:7900> chrome · `7901` firefox · `7902` edge |
+| Grid console | <http://localhost:4444> — live sessions and the containers behind them |
 | Test inbox | <http://localhost:8025> |
-| The application | <https://localhost:8443> (accept the local certificate) |
+| Recordings | `./videos/<session-id>/<test-name>.mp4`, when started with `record=` |
 
-`headed=` is what makes noVNC useful: a headless session shows an empty desktop.
+The application is not published to the host: it lives at `172.19.0.9:3000` on
+the compose network, reachable from the browsers and the runner. `curl` it from
+there with `docker compose exec runner ...`, or add a port mapping if you want
+it on the host.
 
 Tags currently in use: `smoke`, `catalogue`, `auth`, `email`, `access`,
 `account`, `forms`.
@@ -325,35 +343,81 @@ Every setting is an environment variable; see [Configuration](#configuration).
 
 ## Selenium Grid
 
-The grid is a hub plus one node per browser, all on the compose network:
+A **Dynamic Grid** — one `selenium/standalone-docker` container with the Docker
+socket mounted. It runs no browser of its own:
 
 ```
-runner ──HTTP──► selenium-hub:4444 ──► chrome  (2 slots)
-                                   ──► firefox (2 slots)
-                                   ──► edge    (2 slots)
-                                          │
-                                          └──HTTPS──► caddy → artra
+runner ──HTTP──► selenium-hub:4444 ──docker.sock──► browser container  ┐
+                                                    video recorder     ├─ per session,
+                                                    (both removed      ┘  created and
+                                                     when it ends)        destroyed
+                                                          │
+                                                          ▼
+                                              artra  172.19.0.9:3000
 ```
 
-- The **hub** is `selenium/hub:4.43.0`. Its healthcheck is Selenium's own
-  `check-grid.sh`, which reports healthy only once a node has registered — the
-  condition the runner actually needs, since a hub with no nodes accepts a
-  session request and then times it out.
-- The **nodes** are the official `selenium/node-*` images, pinned to exact
-  browser and driver versions so a run is reproducible.
-- `run.sh` starts **only the browsers you asked for**. A full three-node grid
-  costs about 3 GB of RAM that a Chrome-only run has no use for.
-- Each node's `SE_NODE_MAX_SESSIONS` is set to the same number as the client's
-  thread pool, so the grid can serve every thread even if all of them happen to
-  want the same browser at once.
+- **`config.toml` is the tracked template**, and the startup scripts write
+  `config.generated.toml` from it on every run, patching two things:
+  `max-sessions` to match `PARALLELISM`, and `[docker].configs` down to the
+  browsers actually requested. Generated rather than edited in place, so
+  `config.toml` never shows up dirty in `git status`.
+- **Only the requested browsers are declared.** The grid resolves every image in
+  `configs` at startup and pulls any it does not have, so leaving all three in
+  would make `./run.sh browsers=chrome` fetch Firefox and Edge as well —
+  several GB, during which the healthcheck fails.
+- **Images are pre-pulled** before the grid starts, for the same reason: a pull
+  triggered by the first session request can outlast the session timeout.
+- Browser and driver versions are **pinned to exact tags**, so a run is
+  reproducible.
 
 Browsers are selected purely through configuration — the `BROWSERS` environment
 variable, written by the startup scripts and set directly by the CI matrix. No
 test names a browser.
 
-**Supported:** Chrome, Firefox, Edge. Adding one means adding a node to
-`docker-compose.yml` and a case to `DriverFactory` — `CrossBrowserExtensionTest`
-fails if those two ever disagree.
+**What it costs.** A container per session is a few seconds of start-up that a
+long-lived node does not pay, so the full 150-test matrix runs in roughly twelve
+minutes here against about five for a fixed set of always-on nodes. What it buys
+is worth more for this project: every session starts from a genuinely clean
+browser, a Chrome-only run consumes nothing for Firefox and Edge, capacity is one
+number in one file, and video recording comes as a per-session sidecar rather
+than a separate always-running service.
+
+**Supported:** Chrome, Firefox, Edge. Adding one means adding an image to
+`config.toml` and `lib/stack-env.sh` and a case to `DriverFactory` —
+`CrossBrowserExtensionTest` fails if those ever disagree.
+
+### Watching a run
+
+The Grid console at <http://localhost:4444> shows live sessions and the
+containers backing them. For a visual record, record the run to video:
+
+```bash
+./run.sh browsers=chrome,firefox,edge record=chrome,firefox,edge
+```
+
+Each recorded session gets a recorder sidecar that captures the browser
+container's display and writes `videos/<session-id>/<test-name>.mp4`, named
+from the `se:name` capability the suite sets. Two things follow from how this
+works, and both are handled for you:
+
+- **Recording implies headed.** A headless browser paints nothing to the
+  display, so a recorded headless session produces a blank file. `RECORD_VIDEO`
+  therefore also switches those browsers out of headless mode.
+- **The recorder writes as uid 1200.** If `videos/` is not owned by
+  `1200:1201` it produces an empty directory per session and no file at all —
+  silently. `generate_grid_config` sets that ownership before the grid starts,
+  and `archive_videos` hands it back afterwards so the recordings can be moved
+  into `runs/`.
+
+Recording is opt-in, and deliberately so. It roughly halves the number of
+sessions a machine can sustain — the auto-sizer accounts for that — and the
+sessions themselves are slower, because the browser is really rendering. On a
+four-core laptop the full 150-test matrix takes about five minutes headless and
+well over an hour with every browser recorded. Record a slice, not the suite:
+
+```bash
+./run.sh browsers=chrome,firefox,edge record=chrome,firefox,edge tags=smoke
+```
 
 ## Parallel execution
 
@@ -366,8 +430,11 @@ The thread pool is sized by `GridParallelismStrategy`, which reads `PARALLELISM`
 available RAM, capped at 6. Past that the bottleneck stops being the browsers
 and becomes the single application container they all talk to.
 
-That same number is each grid node's session cap, so the client can never queue
-more sessions than the grid will serve.
+That same number becomes the grid's `max-sessions` in
+`config.generated.toml`, so the client can never ask for more browser
+containers than the grid will start at once. Recording halves the auto-sized
+value, because a recorded session runs headed and carries an ffmpeg sidecar
+that saturates a core on its own.
 
 **Shared state is avoided by construction, not by convention:**
 
@@ -385,10 +452,11 @@ more sessions than the grid will serve.
 Every run archives to `runs/<timestamp>/`:
 
 ```
-runs/2026-09-05_14-31-07/
+runs/2026-09-05_18-32-19/
 ├── reports/          Failsafe XML + text, one file per test class
 ├── unit-reports/     Surefire XML for the framework's own unit tests
 ├── diagnostics/      one directory per failure (see below)
+├── videos/           one directory per recorded session, when run with record=
 ├── logs/             the full run log
 └── summary.md        pass/fail table and the list of failures
 ```
@@ -476,10 +544,10 @@ instead of reaching a form as an empty string.
 | Variable | Default | Purpose |
 |---|---|---|
 | `BROWSERS` | `chrome` | Comma-separated browsers each test runs against |
-| `HEADED` | *(empty)* | Subset of `BROWSERS` to run headed, so they can be watched over noVNC |
-| `PARALLELISM` | `1` | Thread pool size and each grid node's session cap |
+| `RECORD_VIDEO` | *(empty)* | Subset of `BROWSERS` to record to video (those run headed) |
+| `PARALLELISM` | `1` | Thread pool size, and the grid's `max-sessions` |
 | `SELENIUM_HUB_URL` | `http://selenium-hub:4444/wd/hub` | Grid router |
-| `TEST_BASE_URL` | `https://artra.test` | The application under test |
+| `TEST_BASE_URL` | `http://172.19.0.9:3000` | The application under test; also what `DriverFactory` declares trustworthy |
 | `MAILPIT_URL` | `http://mailpit:8025` | Test inbox API |
 | `MAIL_WAIT_SECONDS` | `45` | How long an email gets to arrive |
 | `EXPLICIT_WAIT_SECONDS` | `30` | Default `WebDriverWait` timeout |
@@ -501,7 +569,7 @@ value keys a hash or an HMAC inside a throwaway stack — but it is generated pe
 machine so that no example value can ever end up protecting something real.
 
 ```
-APP_URL, APP_WS_URL          where the browsers reach the app (baked into the client bundle)
+APP_URL, APP_WS_URL          the app's fixed address (baked into the client bundle at build time)
 POSTGRES_USER/DB/PASSWORD    the application database
 SEED_STUDENT_EMAIL           the seeded fixture account
 SEED_USER_PASSWORD           its password, hashed with the app's own Argon2 parameters
@@ -512,9 +580,8 @@ SIGNATURE_SECRET, IP_SECRET  device-fingerprint HMAC keys
 EMAIL_FROM, EMAIL_REPLY_TO   headers on the captured mail
 ```
 
-`stack/caddy/certs/` (the CA and the `artra.test` certificate) is generated by
-`scripts/prepare-certs.sh` and is also gitignored — a private key is a private
-key even when it only protects a hostname reserved for testing.
+`config.generated.toml` (the grid's effective configuration for a run) and
+`videos/` are also gitignored; `config.toml` itself is tracked.
 
 ## Email and the test inbox
 
@@ -537,16 +604,15 @@ address.** Read [docs/EMAIL.md](docs/EMAIL.md) before configuring production.
 If you have Docker and two minutes, this is the whole project end to end.
 
 ```bash
-./dev.sh browsers=chrome,firefox,edge headed=chrome,firefox,edge
+./dev.sh browsers=chrome,firefox,edge record=chrome,firefox,edge
 ```
 
 Then, while it runs:
 
 | Open | You will see |
 |---|---|
-| <http://localhost:4444> | the Grid console — three nodes, sessions appearing and disappearing as tests claim them |
-| <http://localhost:7900> · `7901` · `7902` (password `secret`) | Chrome, Firefox and Edge driving the site live, side by side |
-| <https://localhost:8443> | Artra itself, seeded and running (accept the local certificate) |
+| <http://localhost:4444> | the Grid console — sessions appearing and disappearing as the grid starts and destroys a browser container for each one |
+| `docker ps` | `browser-chrome-…` and `recorder-chrome-…` containers coming and going in real time |
 | <http://localhost:8025> | the test inbox filling with verification codes and reset links |
 
 Kick the suite off in another terminal:
@@ -560,6 +626,7 @@ and when it finishes:
 
 ```bash
 cat runs/*/summary.md
+open runs/*/videos/*/*.mp4     # one recording per test, named after it
 ```
 
 On GitHub, the same run is the **E2E** workflow: three matrix jobs, one per

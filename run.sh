@@ -7,6 +7,7 @@
 #
 #   ./run.sh                                   chrome, headless
 #   ./run.sh browsers=chrome,firefox,edge      the full matrix
+#   ./run.sh browsers=chrome record=chrome     record the sessions to video
 #   ./run.sh tags=smoke                        only @Tag("smoke")
 #   ./run.sh test=CourseCatalogueIT            one class
 #   ./run.sh sessions=4                        override the auto-sized parallelism
@@ -23,7 +24,7 @@ cd "$ROOT"
 . "$ROOT/lib/stack-env.sh"
 
 BROWSERS="chrome"
-HEADED=""
+RECORD=""
 SESSIONS=""
 TAGS=""
 TEST=""
@@ -32,14 +33,14 @@ KEEP="false"
 for arg in "$@"; do
     case "$arg" in
         browsers=*) BROWSERS="${arg#*=}" ;;
-        headed=*)   HEADED="${arg#*=}" ;;
+        record=*)   RECORD="${arg#*=}" ;;
         sessions=*) SESSIONS="${arg#*=}" ;;
         tags=*)     TAGS="${arg#*=}" ;;
         test=*)     TEST="${arg#*=}" ;;
         keep=*)     KEEP="${arg#*=}" ;;
         *)
             echo "Unsupported argument: $arg"
-            echo "Usage: ./run.sh [browsers=...] [headed=...] [sessions=N] [tags=...] [test=...] [keep=true]"
+            echo "Usage: ./run.sh [browsers=...] [record=...] [sessions=N] [tags=...] [test=...] [keep=true]"
             exit 1
             ;;
     esac
@@ -48,20 +49,21 @@ done
 sh "$ROOT/scripts/prepare-env.sh"
 APP_URL=$(read_env "$ROOT/.env" APP_URL)
 
-validate_browsers "$BROWSERS" "$HEADED"
-resolve_parallelism "$SESSIONS"
-announce "$BROWSERS" "$HEADED" "$PARALLELISM"
+validate_browsers "$BROWSERS" "$RECORD"
+resolve_parallelism "$SESSIONS" "$RECORD"
+announce "$BROWSERS" "$RECORD" "$PARALLELISM"
 
-sh "$ROOT/scripts/prepare-certs.sh"
 sh "$ROOT/scripts/prepare-app.sh"
+prepull_images "$BROWSERS" "$RECORD"
+generate_grid_config "$BROWSERS" "$PARALLELISM"
 
-export BROWSERS HEADED PARALLELISM
+export BROWSERS RECORD_VIDEO="$RECORD" PARALLELISM
 
 echo "Starting the stack (this builds the application image on first run)..."
 docker compose down --remove-orphans > /dev/null 2>&1 || true
 
 # shellcheck disable=SC2086
-if ! docker compose up -d --build $STACK_SERVICES $(browser_services "$BROWSERS"); then
+if ! docker compose up -d --build $STACK_SERVICES; then
     echo ""
     echo "ERROR: the stack did not come up. Recent logs:"
     docker compose logs --tail 60
@@ -103,14 +105,21 @@ copy_out logs logs
 sh "$ROOT/scripts/summarise.sh" "$RUN_DIR" || true
 
 if [ "$KEEP" != "true" ]; then
+    # Tear down before moving the recordings: the recorder flushes and closes
+    # each .mp4 when its container stops, so archiving first captures truncated
+    # files - or none at all for a session that was still running.
     docker compose down --remove-orphans
+    # The grid creates browser and recorder containers itself, so compose does
+    # not know about them and `down` leaves any that outlived a killed run.
+    reap_grid_containers
+    archive_videos "$RUN_DIR/videos"
 else
     echo ""
     echo "Stack left running. Re-run the suite without restarting it:"
     echo "  docker compose exec runner mvn verify"
     echo "  Grid console:  http://localhost:4444"
     echo "  Mailbox:       http://localhost:8025"
-    echo "  Application:   https://localhost:8443  (accept the local certificate)"
+    echo "  Application:   ${APP_URL:-http://172.19.0.9:3000}  (from inside the stack)"
 fi
 
 echo ""

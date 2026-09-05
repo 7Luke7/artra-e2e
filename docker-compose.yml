@@ -1,27 +1,24 @@
 # The whole test environment, in one file.
 #
-#   test runner  ->  Selenium Grid  ->  Chrome / Firefox / Edge
-#                                            |
-#                                            v
-#                                    Caddy (HTTPS, artra.test)
-#                                            |
-#                                            v
-#                                    Artra (SolidStart)
-#                                            |
-#                          +-----------------+-----------------+
-#                          v                 v                 v
-#                     PostgreSQL           Redis            Mailpit
+#   test runner  ──►  Selenium Grid (standalone-docker)
+#                          │  starts one container per session
+#                          ▼
+#                     chrome / firefox / edge  (+ a video recorder)
+#                          │
+#                          ▼
+#                     Artra  http://172.19.0.9:3000
+#                          │
+#            ┌─────────────┼─────────────┐
+#            ▼             ▼             ▼
+#       PostgreSQL       Redis        Mailpit
 #
-# Everything talks over one bridge network by service name, which is why the
-# browsers can resolve https://artra.test and why the same commands work
-# unchanged on a laptop and on a CI runner.
+# Everything shares one bridge network, which is what lets the browser
+# containers the grid starts on demand reach the application at all.
 #
-#   ./run.sh                       full stack, chrome, run the suite
-#   ./run.sh browsers=chrome,firefox,edge
-#   ./dev.sh browsers=chrome headed=chrome     watch it at http://localhost:7900
-#
-# The generated env files the services read are written by those scripts; see
-# lib/stack-env.sh.
+#   ./run.sh                                      chrome, headless
+#   ./run.sh browsers=chrome,firefox,edge         the full matrix
+#   ./run.sh browsers=chrome record=chrome        record the session to video
+#   ./dev.sh browsers=chrome record=chrome        leave the stack up
 
 name: artra-e2e
 
@@ -42,8 +39,8 @@ services:
       - ./stack/db/init:/docker-entrypoint-initdb.d:ro
       # /var/lib/postgresql, not .../data. From 18 the official image stores the
       # cluster in a major-version subdirectory so pg_upgrade can work across a
-      # mount boundary, and it refuses to start if it finds a volume mounted at
-      # the old path.
+      # mount boundary, and it refuses to start if it finds a volume at the old
+      # path.
       - postgres-data:/var/lib/postgresql
     healthcheck:
       # -h 127.0.0.1 matters. While it runs the init scripts, the official image
@@ -98,16 +95,18 @@ services:
       dockerfile: Dockerfile
       target: runtime
       args:
-        # Inlined into the client bundle at build time - see the Dockerfile.
-        VITE_URL: ${APP_URL:-https://artra.test}
-        VITE_WS_URL: ${APP_WS_URL:-wss://artra.test/ws}
+        # Inlined into the client bundle at build time - see the Dockerfile -
+        # so the address the browsers use has to be known here, and has to be
+        # the same one APP_URL carries at run time.
+        VITE_URL: ${APP_URL:-http://172.19.0.9:3000}
+        VITE_WS_URL: ${APP_WS_URL:-ws://172.19.0.9:3000/ws}
         VITE_EMAIL: ${EMAIL_REPLY_TO:-support@artra.test}
     image: artra-e2e/app:local
     container_name: artra-app
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-artra}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-artra}
       REDIS_URL: redis://redis:6379
-      VITE_URL: ${APP_URL:-https://artra.test}
+      VITE_URL: ${APP_URL:-http://172.19.0.9:3000}
       # Mail goes to the disposable server, never to a real provider. This is
       # the one switch that separates the test environment from production.
       EMAIL_PROVIDER: smtp
@@ -122,12 +121,6 @@ services:
       PASSWORD_RESET_SECRET: ${PASSWORD_RESET_SECRET:?run ./scripts/prepare-env.sh}
       SIGNATURE_SECRET: ${SIGNATURE_SECRET:?run ./scripts/prepare-env.sh}
       IP_SECRET: ${IP_SECRET:?run ./scripts/prepare-env.sh}
-      # Artra fetches its own API over the public URL while server-rendering the
-      # catalogue. Without this, that fetch fails TLS validation, the catalogue
-      # renders its empty state, and the page looks like a database problem.
-      NODE_EXTRA_CA_CERTS: /certs/ca.crt
-    volumes:
-      - ./stack/caddy/certs/ca.crt:/certs/ca.crt:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,10 +128,19 @@ services:
         condition: service_healthy
       mailpit:
         condition: service_healthy
-    # The app resolves its own public hostname back to Caddy - which is what its
-    # server-side fetch needs - through the network alias declared on the caddy
-    # service below.
-    networks: [artra-net]
+    networks:
+      artra-net:
+        # A fixed address, because it is baked into the client bundle at build
+        # time and named in the browsers' trusted-origin settings. A dynamically
+        # assigned one would change whenever the compose project is recreated
+        # and quietly point the whole suite at nothing.
+        ipv4_address: 172.19.0.9
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 30
 
   # One-shot: gives the seeded accounts a password, using the application's own
   # Argon2 parameters. Runs on every `up` and is idempotent, so rotating
@@ -160,104 +162,38 @@ services:
     restart: on-failure:3
     networks: [artra-net]
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: artra-caddy
-    volumes:
-      - ./stack/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      # Issued by scripts/prepare-certs.sh. Gitignored - the key is generated
-      # per machine and protects a hostname that only resolves inside this
-      # network.
-      - ./stack/caddy/certs:/certs:ro
-      - caddy-data:/data
-    ports:
-      # Published so the site can be opened from the host during a demo -
-      # https://localhost:8443 with the certificate warning accepted.
-      - "8443:443"
-    depends_on:
-      artra:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--no-check-certificate", "-q", "-O", "-", "https://artra.test/"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-    networks:
-      artra-net:
-        # The name the browsers resolve, and the host in every cookie, link and
-        # Origin check. It has to match APP_URL exactly.
-        aliases: [artra.test]
-
   # ------------------------------------------------------------ selenium grid --
 
-  selenium-hub:
-    image: selenium/hub:4.43.0-20260404
-    container_name: artra-selenium-hub
+  # The Dynamic Grid. It runs no browser itself: for each session it starts a
+  # container from the images in config.generated.toml, attaches it to this
+  # network, and removes it when the session ends. A session that asks for video
+  # gets a recorder sidecar alongside it.
+  #
+  # This is why the stack cannot collapse into fewer containers: the grid needs
+  # the Docker socket to create those containers.
+  standalone-docker:
+    image: selenium/standalone-docker:4.43.0
+    container_name: selenium-hub
+    volumes:
+      # Recordings land here, one directory per session. The startup scripts
+      # chown this to 1200:1201 first - the recorder writes as that uid, and
+      # without it recording silently produces no files.
+      - ./videos:/opt/selenium/assets
+      # Generated from config.toml with max-sessions patched to PARALLELISM and
+      # only the requested browsers listed.
+      - ./config.generated.toml:/opt/selenium/docker.toml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      # A node whose browsers are all busy should queue, not fail the session.
-      SE_SESSION_REQUEST_TIMEOUT: 300
-      SE_SESSION_RETRY_INTERVAL: 2
+      - SE_VIDEO_FILE_NAME=auto        # name the file from the session's se:name
+      - SE_VIDEO_FILE_NAME_SUFFIX=false
     ports:
-      # The Grid console: sessions, queue depth and which node holds what.
+      # The Grid console: live sessions, the queue, and the containers in flight.
       - "4444:4444"
     healthcheck:
-      # check-grid.sh reports healthy only once the grid is READY, which means
-      # at least one node has registered. That is the condition the test runner
-      # actually needs - a hub with no nodes accepts a session request and then
-      # times it out - so it is worth waiting for rather than merely checking
-      # that the router answers.
-      test: ["CMD", "/opt/bin/check-grid.sh", "--host", "localhost", "--port", "4444"]
-      interval: 5s
-      timeout: 10s
-      # Long enough to cover a first run that is still pulling a browser image.
-      retries: 60
-    networks: [artra-net]
-
-  chrome:
-    image: selenium/node-chrome:147.0-chromedriver-147.0-grid-4.43.0-20260404
-    shm_size: 2gb   # Chrome crashes rather than degrades on a small /dev/shm
-    environment: &node-env
-      SE_EVENT_BUS_HOST: selenium-hub
-      SE_EVENT_BUS_PUBLISH_PORT: 4442
-      SE_EVENT_BUS_SUBSCRIBE_PORT: 4443
-      SE_NODE_MAX_SESSIONS: ${PARALLELISM:-2}
-      SE_NODE_OVERRIDE_MAX_SESSIONS: true
-      SE_NODE_SESSION_TIMEOUT: 300
-      SE_SCREEN_WIDTH: 1920
-      SE_SCREEN_HEIGHT: 1080
-    depends_on:
-      selenium-hub:
-        # service_started, NOT service_healthy. The hub reports healthy only
-        # once a node has registered with it, so waiting for health here would
-        # deadlock: the node waits for the hub, the hub waits for the node.
-        condition: service_started
-    ports:
-      # noVNC: open http://localhost:7900 (password "secret") to watch a headed
-      # session live. Headless sessions show an empty desktop, which is why
-      # dev.sh takes a headed= list.
-      - "7900:7900"
-    networks: [artra-net]
-
-  firefox:
-    image: selenium/node-firefox:129.0-geckodriver-0.36-grid-4.43.0-20260404
-    shm_size: 2gb
-    environment: *node-env
-    depends_on:
-      selenium-hub:
-        condition: service_started
-    ports:
-      - "7901:7900"
-    networks: [artra-net]
-
-  edge:
-    image: selenium/node-edge:146.0-edgedriver-146.0-grid-4.43.0-20260404
-    shm_size: 2gb
-    environment: *node-env
-    depends_on:
-      selenium-hub:
-        condition: service_started
-    ports:
-      - "7902:7900"
+      test: ["CMD-SHELL", "/opt/bin/check-grid.sh --host localhost --port 4444"]
+      interval: 10s
+      timeout: 30s
+      retries: 30
     networks: [artra-net]
 
   # ------------------------------------------------------------- test runner --
@@ -272,7 +208,7 @@ services:
     tty: true
     environment:
       SELENIUM_HUB_URL: http://selenium-hub:4444/wd/hub
-      TEST_BASE_URL: ${APP_URL:-https://artra.test}
+      TEST_BASE_URL: ${APP_URL:-http://172.19.0.9:3000}
       MAILPIT_URL: http://mailpit:8025
       DATABASE_JDBC_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-artra}
       DATABASE_USER: ${POSTGRES_USER:-artra}
@@ -280,12 +216,12 @@ services:
       SEED_STUDENT_EMAIL: ${SEED_STUDENT_EMAIL:-student@artra.test}
       SEED_USER_PASSWORD: ${SEED_USER_PASSWORD}
       BROWSERS: ${BROWSERS:-chrome}
-      HEADED: ${HEADED:-}
+      RECORD_VIDEO: ${RECORD_VIDEO:-}
       PARALLELISM: ${PARALLELISM:-2}
     depends_on:
-      caddy:
+      artra:
         condition: service_healthy
-      selenium-hub:
+      standalone-docker:
         condition: service_healthy
       mailpit:
         condition: service_healthy
@@ -304,17 +240,17 @@ services:
       # container, so a mount would leave root-owned build output in the host's
       # working tree and break the next host-side build. run.sh copies the
       # reports out with `docker compose cp` instead.
-      #
-      # /root/.m2 is deliberately not a volume either: an empty one mounted
-      # there would shadow the dependencies the image pre-fetched and force a
-      # full re-download on every fresh machine.
     networks: [artra-net]
 
 networks:
   artra-net:
     name: artra-net
     driver: bridge
+    ipam:
+      config:
+        # Pinned so the application's address is a constant. The browsers the
+        # grid starts join this same network, which is how they reach it.
+        - subnet: 172.19.0.0/16
 
 volumes:
   postgres-data:
-  caddy-data:

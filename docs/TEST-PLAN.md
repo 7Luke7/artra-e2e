@@ -82,3 +82,7 @@ Flakiness is treated as a defect in the suite, not as weather.
   either fragile or slow.
 - **Every test is independent**, so a rerun of one failure is meaningful and the
   order they run in is not.
+- **Every session is a fresh container.** The grid starts one per test and
+  destroys it afterwards, so no cookie, cache entry or profile setting can
+  survive from one test into the next — isolation is a property of the
+  environment rather than of cleanup code that has to remember everything.

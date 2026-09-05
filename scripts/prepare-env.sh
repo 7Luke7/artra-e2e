@@ -38,8 +38,8 @@ cat > "$ENV_FILE" << EOF
 # keyed by ARGON_SECRET:
 #   docker compose down -v
 
-APP_URL=https://artra.test
-APP_WS_URL=wss://artra.test/ws
+APP_URL=http://172.19.0.9:3000
+APP_WS_URL=ws://172.19.0.9:3000/ws
 
 POSTGRES_USER=artra
 POSTGRES_DB=artra

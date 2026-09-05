@@ -3,6 +3,7 @@ package com.artra.e2e.base;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URL;
+import java.util.Optional;
 
 import org.openqa.selenium.MutableCapabilities;
 import org.openqa.selenium.PageLoadStrategy;
@@ -16,16 +17,29 @@ import org.openqa.selenium.remote.RemoteWebDriver;
  *
  * Everything here is per-session and decided by the caller
  * ({@link CrossBrowserExtension}), not globally: which browser, whether it is
- * recorded, and what the session is called in the Grid UI. That is what lets a
- * single run drive Chrome, Firefox and Edge concurrently from the same JVM.
+ * recorded, and what the session is called. That is what lets a single run
+ * drive Chrome, Firefox and Edge concurrently from the same JVM.
+ *
+ * <h2>Why each browser is told to trust the application's origin</h2>
+ *
+ * Artra marks its session and verification cookies {@code Secure}. A browser
+ * only stores those from an origin it considers <em>potentially trustworthy</em>
+ * - HTTPS, or localhost. The application is served over plain HTTP at a
+ * container address, which is neither, so by default every cookie it sets is
+ * discarded silently: no error, no console warning, just a sign-in that never
+ * sticks and thirty tests failing for a reason nothing logs.
+ *
+ * Each engine has its own way to declare an origin trustworthy anyway, and all
+ * three are applied below from the configured base URL, so changing
+ * TEST_BASE_URL cannot leave the setting pointing at the old address.
  */
 public final class DriverFactory {
 
     private static final TestConfig CONFIG = ConfigProvider.get();
 
-    /** Fixed so screenshots from different browsers are directly comparable and
-     *  the desktop layout (which is what these tests assert) is the one
-     *  rendered - Artra hides its main nav below the lg breakpoint. */
+    /** Fixed so screenshots and recordings from different browsers are directly
+     *  comparable, and so the desktop layout - the one the tests assert on - is
+     *  what gets rendered. Artra hides its main navigation below `lg`. */
     private static final int WINDOW_WIDTH = 1920;
     private static final int WINDOW_HEIGHT = 1080;
 
@@ -33,14 +47,17 @@ public final class DriverFactory {
     }
 
     /**
-     * @param browser  "chrome", "firefox" or "edge"
-     * @param testName shown in the Grid UI, so a session that is still running
-     *                 can be identified while watching it over noVNC
-     * @param headed   true -> renders into the node's Xvfb display, which is
-     *                 what noVNC streams; false -> headless
+     * @param browser     "chrome", "firefox" or "edge"
+     * @param testName    shown in the Grid console and used by the recorder to
+     *                    name the .mp4 (se:name)
+     * @param recordVideo true -> the grid starts a recorder alongside the
+     *                    browser, and the browser runs headed so there is
+     *                    something to record; false -> headless
      */
-    public static RemoteWebDriver create(String browser, String testName, boolean headed) {
-        boolean headless = !headed;
+    public static RemoteWebDriver create(String browser, String testName, boolean recordVideo) {
+        // Headless renders nothing to the node's display, so a recorded
+        // headless session produces a blank video. Recording implies headed.
+        boolean headless = !recordVideo;
 
         MutableCapabilities caps = switch (browser) {
             case "chrome" -> chrome(headless);
@@ -49,18 +66,8 @@ public final class DriverFactory {
             default -> throw new IllegalArgumentException("Unsupported browser: " + browser);
         };
 
-        // Artra is served over HTTPS with a certificate from Caddy's internal
-        // CA (see stack/caddy/Caddyfile). Trusting it per session is the one
-        // approach that works identically on all three browsers - the
-        // alternative, Chrome's --unsafely-treat-insecure-origin-as-secure, has
-        // no Firefox equivalent that also covers Secure cookies.
-        caps.setCapability("acceptInsecureCerts", true);
-
-        // Names the session in the Grid console, so one that is still running can
-        // be matched to the test driving it. The node's display size is set by
-        // SE_SCREEN_WIDTH/HEIGHT in docker-compose.yml; the window size below is
-        // what the page actually lays out against.
         caps.setCapability("se:name", testName);
+        caps.setCapability("se:recordVideo", recordVideo);
 
         return new RemoteWebDriver(hubUrl(), caps);
     }
@@ -82,7 +89,6 @@ public final class DriverFactory {
             // Chrome crashes rather than degrades when it runs out.
             "--disable-dev-shm-usage",
             "--no-sandbox",
-            "--incognito",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-extensions",
@@ -94,6 +100,14 @@ public final class DriverFactory {
             "--disable-features=BackForwardCache",
             "--disable-back-forward-cache"
         );
+
+        // Chromium ignores --unsafely-treat-insecure-origin-as-secure unless a
+        // profile directory is given as well. No --incognito for the same
+        // reason; isolation comes from the container being thrown away after
+        // every session, which is stronger than a private window anyway.
+        insecureOrigin().ifPresent(origin -> options.addArguments(
+            "--unsafely-treat-insecure-origin-as-secure=" + origin,
+            "--user-data-dir=/tmp/artra-e2e-profile"));
 
         return options;
     }
@@ -107,14 +121,15 @@ public final class DriverFactory {
         }
 
         options.addArguments("--width=" + WINDOW_WIDTH, "--height=" + WINDOW_HEIGHT);
-        // A fresh profile per session already isolates cookies; private
-        // browsing additionally stops Firefox restoring a previous session's
-        // tabs when the node reuses its profile directory.
-        options.addPreference("browser.privatebrowsing.autostart", true);
-        // Firefox otherwise offers to save the password on every login test and
-        // the doorhanger intercepts the next click.
+        // Firefox otherwise offers to save the password on every sign-in test,
+        // and the doorhanger intercepts the next click.
         options.addPreference("signon.rememberSignons", false);
         options.addPreference("browser.cache.disk.enable", false);
+
+        // Firefox's equivalent of Chromium's flag. It takes bare hosts, not
+        // origins - no scheme, no port.
+        insecureHost().ifPresent(host ->
+            options.addPreference("dom.securecontext.allowlist", host));
 
         return options;
     }
@@ -131,13 +146,64 @@ public final class DriverFactory {
             "--window-size=" + WINDOW_WIDTH + "," + WINDOW_HEIGHT,
             "--disable-dev-shm-usage",
             "--no-sandbox",
-            "--inprivate",
             "--no-first-run",
             "--disable-extensions",
             "--disable-features=msEdgeIdentityFre,msImplicitSignin"
         );
 
+        insecureOrigin().ifPresent(origin -> options.addArguments(
+            "--unsafely-treat-insecure-origin-as-secure=" + origin,
+            "--user-data-dir=/tmp/artra-e2e-profile"));
+
         return options;
+    }
+
+    private static Optional<String> insecureOrigin() {
+        return insecureOrigin(CONFIG.baseUrl());
+    }
+
+    private static Optional<String> insecureHost() {
+        return insecureHost(CONFIG.baseUrl());
+    }
+
+    /**
+     * The application's origin, when it needs declaring as trustworthy.
+     *
+     * Empty for an HTTPS base URL, and for localhost - a browser already
+     * treats both as trustworthy, and passing the flag anyway would be a
+     * setting that outlives the reason for it.
+     *
+     * Package-private and taking the URL as an argument so it can be unit
+     * tested: getting this wrong does not fail loudly, it just makes every
+     * authenticated test fail with an empty cookie jar.
+     */
+    static Optional<String> insecureOrigin(String baseUrl) {
+        URI uri = parse(baseUrl);
+        if (!"http".equalsIgnoreCase(uri.getScheme()) || isLocalhost(uri.getHost())) {
+            return Optional.empty();
+        }
+        return Optional.of(uri.getScheme() + "://" + uri.getHost()
+                + (uri.getPort() > 0 ? ":" + uri.getPort() : ""));
+    }
+
+    /** The bare host, which is the form Firefox's allowlist preference takes. */
+    static Optional<String> insecureHost(String baseUrl) {
+        return insecureOrigin(baseUrl).map(origin -> parse(baseUrl).getHost());
+    }
+
+    private static boolean isLocalhost(String host) {
+        return host == null
+            || "localhost".equalsIgnoreCase(host)
+            || "127.0.0.1".equals(host)
+            || "::1".equals(host);
+    }
+
+    private static URI parse(String baseUrl) {
+        try {
+            return URI.create(baseUrl);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("Invalid TEST_BASE_URL: " + baseUrl, e);
+        }
     }
 
     private static URL hubUrl() {
@@ -145,7 +211,7 @@ public final class DriverFactory {
         try {
             return URI.create(raw).toURL();
         } catch (MalformedURLException | IllegalArgumentException e) {
-            throw new IllegalStateException("Invalid selenium.hub.url: " + raw, e);
+            throw new IllegalStateException("Invalid SELENIUM_HUB_URL: " + raw, e);
         }
     }
 }

@@ -15,9 +15,9 @@ import org.junit.jupiter.api.extension.TestTemplateInvocationContextProvider;
  * listed in BROWSERS, and hands each invocation its own {@link DriverLifecycle}
  * so no state is shared between them.
  *
- * HEADED decides, per browser, whether that invocation renders into the node's
- * Xvfb display - which is what makes it watchable over noVNC - or runs
- * headless.
+ * RECORD_VIDEO decides, per browser, whether that invocation is recorded - and
+ * so whether it runs headed, since there is nothing to record from a headless
+ * browser.
  */
 public class CrossBrowserExtension implements TestTemplateInvocationContextProvider {
 
@@ -32,10 +32,10 @@ public class CrossBrowserExtension implements TestTemplateInvocationContextProvi
     public Stream<TestTemplateInvocationContext> provideTestTemplateInvocationContexts(
             ExtensionContext context) {
 
-        Set<String> headed = Set.copyOf(splitCsv(ConfigProvider.get().headedBrowsers()));
+        Set<String> recorded = Set.copyOf(splitCsv(ConfigProvider.get().recordVideo()));
 
         return configuredBrowsers().stream()
-                .map(browser -> new BrowserInvocation(browser, headed.contains(browser)));
+                .map(browser -> new BrowserInvocation(browser, recorded.contains(browser)));
     }
 
     /**
@@ -74,7 +74,7 @@ public class CrossBrowserExtension implements TestTemplateInvocationContextProvi
 
     /** One run of the template: its display name and the extension that owns
      *  that run's driver. */
-    private record BrowserInvocation(String browser, boolean headed)
+    private record BrowserInvocation(String browser, boolean record)
             implements TestTemplateInvocationContext {
 
         @Override
@@ -84,7 +84,7 @@ public class CrossBrowserExtension implements TestTemplateInvocationContextProvi
 
         @Override
         public List<Extension> getAdditionalExtensions() {
-            return List.of(new DriverLifecycle(browser, headed));
+            return List.of(new DriverLifecycle(browser, record));
         }
     }
 }

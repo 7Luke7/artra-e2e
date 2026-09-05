@@ -1,19 +1,21 @@
 # Build output
 target/
 
-# Run artifacts: reports, screenshots and logs are archived here per run
+# Run artifacts: reports, screenshots, logs and recordings are archived here
 runs/
+
+# Session recordings, before run.sh files them under runs/
+videos/
+
+# The grid's effective config for a run, written from config.toml by the
+# startup scripts. config.toml itself is tracked.
+config.generated.toml
 
 # Generated per machine by scripts/prepare-env.sh. Holds the throwaway
 # secrets the local stack keys its hashes with - never committed.
 # .env.example is the tracked template.
 .env
 *.local
-
-# TLS material for the local stack, issued per machine by
-# scripts/prepare-certs.sh. Never committed - a checked-in private key is a
-# checked-in private key even when it only protects a .test hostname.
-stack/caddy/certs/
 
 # Staged copy of the application under test (see scripts/prepare-app.sh)
 .artra-build/

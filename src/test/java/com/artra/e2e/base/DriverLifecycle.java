@@ -38,19 +38,19 @@ public class DriverLifecycle
     private static final TestConfig CONFIG = ConfigProvider.get();
 
     private final String browser;
-    private final boolean headed;
+    private final boolean record;
 
-    public DriverLifecycle(String browser, boolean headed) {
+    public DriverLifecycle(String browser, boolean record) {
         this.browser = browser;
-        this.headed = headed;
+        this.record = record;
     }
 
     @Override
     public void beforeEach(ExtensionContext context) {
         String testName = sessionName(context);
-        log.info("▶ {} [{}] starting (headed={})", testName, browser, headed);
+        log.info("▶ {} [{}] starting (recordVideo={})", testName, browser, record);
 
-        RemoteWebDriver driver = DriverFactory.create(browser, testName, headed);
+        RemoteWebDriver driver = DriverFactory.create(browser, testName, record);
         driver.manage().timeouts()
                 .implicitlyWait(Duration.ofSeconds(CONFIG.implicitWaitSeconds()))
                 .pageLoadTimeout(Duration.ofSeconds(CONFIG.pageLoadTimeoutSeconds()));
@@ -108,7 +108,7 @@ public class DriverLifecycle
         return driver;
     }
 
-    /** Name shown in the Grid UI, so a live session can be matched to a test. */
+    /** Shown in the Grid console, and used by the recorder to name the .mp4. */
     private static String sessionName(ExtensionContext context) {
         return sanitise(methodName(context) + "-" + context.getDisplayName());
     }

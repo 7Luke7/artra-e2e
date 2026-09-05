@@ -1,0 +1,42 @@
+# Selenium Dynamic Grid configuration.
+#
+# The grid does not run browsers itself: it starts one container per session
+# through the Docker socket, from the images listed below, and stops it when the
+# session ends. A session that asks for video also gets a recorder sidecar.
+#
+# This file is the tracked template. The startup scripts write
+# config.generated.toml from it on every run, patching two things:
+#
+#   max-sessions      set to PARALLELISM, so grid capacity and the client's
+#                     thread pool are the same number
+#   [docker].configs  reduced to the browsers actually requested
+#
+# The second matters: the grid resolves every image listed here at startup and
+# pulls any it does not already have. With all three always declared, asking for
+# Chrome alone still made it fetch Firefox and Edge mid-boot - several GB - and
+# the healthcheck failed while it did.
+
+[docker]
+configs = [
+    "selenium/standalone-chrome:147.0-chromedriver-147.0-grid-4.43.0-20260404", '{"browserName": "chrome"}',
+    "selenium/standalone-firefox:129.0-geckodriver-0.36-grid-4.43.0-20260404", '{"browserName": "firefox"}',
+    "selenium/standalone-edge:146.0-edgedriver-146.0-grid-4.43.0-20260404", '{"browserName": "MicrosoftEdge"}'
+]
+
+# The daemon the grid talks to. It reaches it over the mounted socket; this
+# value is what the grid reports about itself, not how it connects.
+url = "http://127.0.0.1:2375"
+
+video-image = "selenium/video:ffmpeg-8.1-20260505"
+
+[node]
+detect-drivers = false
+enable-managed-downloads = true
+override-max-sessions = true
+max-sessions = 4
+session-timeout = 1000
+enable-cdp = true
+selenium-manager = false
+
+[router]
+disable-ui = false

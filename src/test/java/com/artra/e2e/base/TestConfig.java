@@ -51,17 +51,18 @@ public interface TestConfig extends Config {
     String browsers();
 
     /**
-     * Comma-separated subset of BROWSERS to run <b>headed</b> instead of
-     * headless, e.g. "chrome,firefox".
+     * Comma-separated subset of BROWSERS whose sessions are recorded to video,
+     * e.g. "chrome,edge". Empty records nothing.
      *
-     * A headed session paints into the node's Xvfb display, which the grid's
-     * node images stream over noVNC - so a headed browser can be watched live
-     * at http://localhost:7900 (chrome), :7901 (firefox), :7902 (edge) while
-     * the test runs. That is the debugging tool here; nothing else changes.
+     * A recorded browser runs headed: the grid starts a recorder container
+     * alongside it that captures the browser container's display, and a
+     * headless browser paints nothing there - so a recorded headless session
+     * produces a blank file. Recordings land in videos/, one directory per
+     * session, and run.sh archives them with the rest of the run.
      */
-    @Key("HEADED")
+    @Key("RECORD_VIDEO")
     @DefaultValue("")
-    String headedBrowsers();
+    String recordVideo();
 
     /**
      * Total grid capacity, which is also JUnit's thread-pool size - see
@@ -75,13 +76,19 @@ public interface TestConfig extends Config {
     // --------------------------------------------------- application under test --
 
     /**
-     * Where the browsers reach Artra. HTTPS on purpose: Artra sets its session
-     * and verification cookies with the Secure attribute, and a browser drops
-     * those over plain HTTP on any host that is not localhost - which a
-     * containerised browser never is. See stack/caddy/Caddyfile.
+     * Where the browsers reach Artra.
+     *
+     * A fixed container address on the compose network, pinned in
+     * docker-compose.yml because it is also baked into the application's client
+     * bundle at build time. The browser containers the grid starts on demand
+     * join that same network, which is how they reach it.
+     *
+     * It is plain HTTP while the app's cookies are Secure, which a browser
+     * would normally refuse to store - see DriverFactory, which declares this
+     * exact origin trustworthy to each engine.
      */
     @Key("TEST_BASE_URL")
-    @DefaultValue("https://artra.test")
+    @DefaultValue("http://172.19.0.9:3000")
     String baseUrl();
 
     // ------------------------------------------------------------- mailbox --
