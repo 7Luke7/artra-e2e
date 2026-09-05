@@ -526,6 +526,35 @@ page.
 **Manual runs.** *Actions → E2E → Run workflow* takes a browser list and a tag
 filter, so a targeted run needs no YAML edit.
 
+### The suite also gates the application's own repository
+
+The application lives in [7Luke7/Artraa](https://github.com/7Luke7/Artraa), and
+that repository has a workflow of its own which checks this suite out and runs it
+against the commit being pushed. So a change to Artra is tested by these tests
+before it can land, not only when someone remembers to run them.
+
+```
+Artraa: push to main / pull request
+        └── checks out 7Luke7/artra-e2e@main   (the suite)
+        └── checks out this commit             (the application)
+            └── ./run.sh browsers=<matrix>  ×  chrome | firefox | edge
+```
+
+`main` on that repository is protected: changes go through a pull request, and
+all three E2E jobs are required status checks. A direct push is refused by
+GitHub outright —
+
+```
+remote: - Changes must be made through a pull request.
+remote: - 3 of 3 required status checks are expected.
+ ! [remote rejected] main -> main (protected branch hook declined)
+```
+
+The suite is pinned to this repository's `main` rather than to a tag, so a
+regression test written here starts guarding the application as soon as it
+exists. The trade-off is real and deliberate: a newly strict test here can turn
+the application's CI red without the application having changed.
+
 **No secrets are configured for CI, and none are needed.** The stack generates
 its own throwaway keys and captures every email in a disposable mail server.
 That is deliberate: a pull request from a fork can run the entire suite without
