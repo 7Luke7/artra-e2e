@@ -29,12 +29,7 @@ env:
   # The application under test lives in its own repository. The suite stages it
   # at build time - see scripts/prepare-app.sh.
   ARTRA_REPOSITORY: 7Luke7/Artraa
-  # TEMPORARY - revert to main once the paired application change is merged.
-  # This change and 7Luke7/Artraa#verification-ux-and-schema depend on each
-  # other: the stack now builds its database from the application's migrations/
-  # directory, which does not exist on Artraa's main yet. Pointing at the branch
-  # is what lets this pull request test the pairing that will actually ship.
-  ARTRA_REF: verification-ux-and-schema
+  ARTRA_REF: main
 
 jobs:
 
