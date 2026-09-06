@@ -152,9 +152,21 @@ jobs:
           # Assembled rather than branched: `[ -n "$X" ] && args=...` is a
           # non-zero status when X is empty, and the default shell here is
           # `bash -e`, so that one-liner would fail the step on an ordinary run.
-          args="browsers=${{ matrix.browser }} sessions=2"
+          args="browsers=${{ matrix.browser }}"
           if [ -n "$TAGS" ]; then args="$args tags=$TAGS"; fi
-          if [ -n "$RECORD" ]; then args="$args record=$RECORD"; fi
+
+          if [ -n "$RECORD" ]; then
+            # No sessions= here. run.sh auto-sizes a recorded run at half the
+            # cores, because a recorded session needs about twice what a
+            # headless one does - the browser paints for real and an ffmpeg
+            # sidecar encodes 1920x1080 beside it. Forcing sessions=2 onto a
+            # two-core runner starves those encoders: a first attempt captured
+            # 26 frames of a 12-second test, written at a nominal 15fps, so the
+            # whole test was there but played back seven times too fast.
+            args="$args record=$RECORD"
+          else
+            args="$args sessions=2"
+          fi
 
           echo "./run.sh $args"
           ./run.sh $args
