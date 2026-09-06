@@ -17,6 +17,10 @@ on:
         description: "JUnit @Tag values to run, e.g. smoke,auth (empty runs everything)"
         default: ""
         type: string
+      record:
+        description: "Record the sessions to video. Much slower - pair it with tags."
+        default: false
+        type: boolean
 
 # A new push supersedes the run already in flight for the same branch: a full
 # matrix takes several minutes, and finishing one for a commit that has already
@@ -99,7 +103,12 @@ jobs:
     name: E2E (${{ matrix.browser }})
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A recorded run is not a slower version of the same thing: the browser runs
+    # headed and really renders, and an ffmpeg sidecar encodes 1920x1080
+    # alongside it. On a two-core runner that is three processes competing for
+    # two cores. Headless takes 8-11 minutes here; recorded is comfortably past
+    # the ordinary limit, so it gets its own.
+    timeout-minutes: ${{ inputs.record && 90 || 45 }}
     strategy:
       # Chrome failing tells you nothing about Firefox. Finish the whole matrix.
       fail-fast: false
@@ -135,12 +144,20 @@ jobs:
         env:
           ARTRA_PATH: ${{ github.workspace }}/.artra-src
           TAGS: ${{ inputs.tags }}
+          # Empty on push and pull_request, so an ordinary run is never
+          # recorded. run.sh takes a browser list, and this job only ever drives
+          # one, so recording this run means recording this browser.
+          RECORD: ${{ inputs.record && matrix.browser || '' }}
         run: |
-          if [ -n "$TAGS" ]; then
-            ./run.sh browsers=${{ matrix.browser }} sessions=2 tags="$TAGS"
-          else
-            ./run.sh browsers=${{ matrix.browser }} sessions=2
-          fi
+          # Assembled rather than branched: `[ -n "$X" ] && args=...` is a
+          # non-zero status when X is empty, and the default shell here is
+          # `bash -e`, so that one-liner would fail the step on an ordinary run.
+          args="browsers=${{ matrix.browser }} sessions=2"
+          if [ -n "$TAGS" ]; then args="$args tags=$TAGS"; fi
+          if [ -n "$RECORD" ]; then args="$args record=$RECORD"; fi
+
+          echo "./run.sh $args"
+          ./run.sh $args
 
       # always(): a failed run is exactly when these are worth having.
       - name: Upload test results and failure diagnostics
@@ -148,6 +165,11 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: e2e-${{ matrix.browser }}
+          # runs/<timestamp>/ holds the reports, the run log, the failure
+          # diagnostics, and - when the run was recorded - videos/<session>/
+          # <test>.mp4. Without record= those session directories are still
+          # here, because the grid writes its own server log into each one, but
+          # they hold no video: nothing was ever asked to capture one.
           path: runs/
           if-no-files-found: warn
           retention-days: 14
