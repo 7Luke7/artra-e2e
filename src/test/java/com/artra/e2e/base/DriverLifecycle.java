@@ -58,6 +58,10 @@ public class DriverLifecycle
         WebDriverWait wait =
                 new WebDriverWait(driver, Duration.ofSeconds(CONFIG.explicitWaitSeconds()));
 
+        // No-op unless the app is being served through a tunnel, which is not
+        // the default. See TunnelInterstitial for what it is getting past.
+        TunnelInterstitial.accept(driver, CONFIG.baseUrl());
+
         Store store = context.getStore(NAMESPACE);
         store.put(DRIVER_KEY, driver);
         store.put(WAIT_KEY, wait);

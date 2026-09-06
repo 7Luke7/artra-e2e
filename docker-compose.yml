@@ -6,7 +6,7 @@
 #                     chrome / firefox / edge  (+ a video recorder)
 #                          │
 #                          ▼
-#                     Artra  http://172.19.0.9:3000
+#                     Artra  http://172.19.0.9:3000  ◄── ngrok (public=on)
 #                          │
 #            ┌─────────────┼─────────────┐
 #            ▼             ▼             ▼
@@ -18,6 +18,7 @@
 #   ./run.sh                                      chrome, headless
 #   ./run.sh browsers=chrome,firefox,edge         the full matrix
 #   ./run.sh browsers=chrome record=chrome        record the session to video
+#   ./run.sh public=on                            serve it over HTTPS, for Google sign-in
 #   ./dev.sh browsers=chrome record=chrome        leave the stack up
 
 name: artra-e2e
@@ -37,6 +38,11 @@ services:
       # Postgres runs everything in here once, in name order, the first time the
       # data directory is empty: schema, then the fixture catalogue.
       - ./stack/db/init:/docker-entrypoint-initdb.d:ro
+      # The application's own migrations, staged out of its checkout by
+      # scripts/prepare-app.sh. 01-schema.sh applies them, so the suite runs
+      # against the schema a deployment would get rather than against a copy
+      # this repository keeps in step by hand.
+      - ./.artra-build/migrations:/migrations:ro
       # /var/lib/postgresql, not .../data. From 18 the official image stores the
       # cluster in a major-version subdirectory so pg_upgrade can work across a
       # mount boundary, and it refuses to start if it finds a volume at the old
@@ -101,6 +107,12 @@ services:
         VITE_URL: ${APP_URL:-http://172.19.0.9:3000}
         VITE_WS_URL: ${APP_WS_URL:-ws://172.19.0.9:3000/ws}
         VITE_EMAIL: ${EMAIL_REPLY_TO:-support@artra.test}
+        # Public, not secret - it identifies the OAuth client to Google and is
+        # rendered into the sign-in button's markup. Empty in the default mode,
+        # where the app is served over plain HTTP at a container address and
+        # Google would refuse to render the button anyway; see the ngrok
+        # service below and ./run.sh public=on.
+        VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
     image: artra-e2e/app:local
     container_name: artra-app
     environment:
@@ -160,6 +172,47 @@ services:
       postgres:
         condition: service_healthy
     restart: on-failure:3
+    networks: [artra-net]
+
+  # ------------------------------------------------------------- public url --
+
+  # An HTTPS front door for the application, off by default.
+  #
+  # Google's sign-in button refuses to render on an origin Google does not
+  # recognise, and it only recognises HTTPS ones (localhost aside). The default
+  # address - plain HTTP on a container IP - can be neither registered in the
+  # Google Cloud console nor served over TLS, so the button never appears and
+  # the OAuth screen cannot open at all.
+  #
+  # This tunnels the app out through a reserved ngrok domain, which *is* an
+  # origin that can be registered. NGROK_DOMAIN has to match the client's
+  # authorised JavaScript origin, and NGROK_DOMAIN/api/auth/google its
+  # authorised redirect URI.
+  #
+  # In the `public` profile, so nothing here runs - and no credential is
+  # required - unless the mode is asked for:  ./run.sh public=on
+  ngrok:
+    image: ngrok/ngrok:3
+    container_name: artra-ngrok
+    profiles: [public]
+    # A reserved domain rather than the random one a free tunnel gets by
+    # default: the URL is registered with Google and baked into the client
+    # bundle, so it has to survive a restart of the stack.
+    command:
+      - http
+      - --url=https://${NGROK_DOMAIN:-}
+      - --log=stdout
+      - --log-format=logfmt
+      - artra:3000
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      # The agent's own inspector: every request through the tunnel, with
+      # headers and bodies, replayable. http://localhost:4040
+      - "4040:4040"
+    depends_on:
+      artra:
+        condition: service_healthy
     networks: [artra-net]
 
   # ------------------------------------------------------------ selenium grid --
