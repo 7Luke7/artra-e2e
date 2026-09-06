@@ -39,6 +39,7 @@ browsers, no database, and no credentials.
 - [Continuous integration](#continuous-integration)
 - [Configuration](#configuration)
 - [Email and the test inbox](#email-and-the-test-inbox)
+- [Google sign-in and the public URL](#google-sign-in-and-the-public-url)
 - [A two-minute tour](#a-two-minute-tour)
 - [Known limitations](#known-limitations)
 
@@ -111,6 +112,9 @@ name and its failure message what it is protecting.
   │      │                                                 ▼             │
   │      │                                    artra  172.19.0.9:3000     │
   │      │                                         (SolidStart)          │
+  │      │                                                 ▲             │
+  │      │                                      ngrok ─────┘             │
+  │      │                                   (public=on only)            │
   │      │                                                 │             │
   │      ├──────────────┬──────────────────────────────────┤             │
   │      ▼              ▼                                  ▼             │
@@ -146,6 +150,13 @@ on Chrome and Edge, the `dom.securecontext.allowlist` preference on Firefox —
 derived from `TEST_BASE_URL`, so changing the address cannot leave the setting
 pointing at the old one.
 
+**One address, except when Google has to see it.** The fixed container address
+cannot be registered with Google, so the sign-in button never renders on it.
+`public=on` adds an ngrok tunnel to the project and rebuilds the bundle to point
+at its domain — see [Google sign-in and the public
+URL](#google-sign-in-and-the-public-url). It is a compose profile, so an
+ordinary run neither starts it nor needs an account for it.
+
 **Email is captured, never sent.** The application's email provider is selected
 by `EMAIL_PROVIDER`: `resend` in production, `smtp` in the test stack, pointed
 at [Mailpit](https://mailpit.axllent.org/). The suite reads verification codes
@@ -157,6 +168,15 @@ end without an external provider, a real mailbox, or any credential. See
 repository. `scripts/prepare-app.sh` copies a local checkout (or clones a fresh
 one) into `.artra-build/` and adds this repository's Dockerfile, so the
 application repository is never modified just to be testable.
+
+**The schema comes from the application, not from here.** This repository used
+to keep its own copy of the schema, because Artra had no migration tool and
+there was otherwise no way to build the database from nothing — which meant two
+definitions to keep in step, and only one of them tested. Artra now owns its
+schema in `migrations/`; `prepare-app.sh` stages that directory and
+`stack/db/init/01-schema.sh` applies it on first start. Every run therefore
+builds the database exactly the way a deployment would, and a migration that is
+broken fails the suite instead of a release.
 
 ## Test strategy
 
@@ -254,8 +274,9 @@ artra-e2e/
 │
 ├── config.toml                Dynamic Grid template; the scripts generate
 │                              config.generated.toml from it per run
-├── lib/stack-env.sh           browser validation, machine sizing, grid config,
-│                              video ownership and archiving
+├── lib/stack-env.sh           application URL and mode, browser validation,
+│                              machine sizing, grid config, video ownership
+│                              and archiving
 ├── scripts/
 │   ├── prepare-env.sh         generates .env on first run (no committed secrets)
 │   ├── prepare-app.sh         stages the application under test
@@ -264,11 +285,13 @@ artra-e2e/
 ├── stack/
 │   ├── app/Dockerfile         builds Artra for testing
 │   ├── app/seed-users.mjs     gives the seeded accounts a password (Argon2id)
-│   └── db/init/               01-schema.sql, 02-seed.sql
+│   └── db/init/               01-schema.sh applies the application's own
+│                              migrations; 02-seed.sql adds the fixtures
 │
 ├── src/test/java/com/artra/e2e/
 │   ├── base/                  config, driver lifecycle, cross-browser template,
-│   │                          parallelism strategy, failure diagnostics, BasePage
+│   │                          parallelism strategy, failure diagnostics, BasePage,
+│   │                          tunnel interstitial (public mode)
 │   ├── components/            Header — shared across pages
 │   ├── pages/                 one class per screen
 │   ├── support/               Mailpit client, database fixtures, test data, flows
@@ -291,6 +314,7 @@ artra-e2e/
 ./run.sh test=CourseCatalogueIT              # one class
 ./run.sh sessions=4                          # override the auto-sized parallelism
 ./run.sh keep=true                           # leave the stack running afterwards
+./run.sh public=on                           # serve the app over HTTPS, for Google sign-in
 ```
 
 `run.sh` brings the stack up, runs the suite, archives the results under
@@ -607,7 +631,14 @@ CODE_PEPPER                  verification-code HMAC key
 PASSWORD_RESET_SECRET        reset-token HMAC key
 SIGNATURE_SECRET, IP_SECRET  device-fingerprint HMAC keys
 EMAIL_FROM, EMAIL_REPLY_TO   headers on the captured mail
+
+NGROK_DOMAIN                 optional; the reserved domain public mode serves through
+NGROK_AUTHTOKEN              optional; the ngrok account that owns it
+GOOGLE_CLIENT_ID             optional; the OAuth client registered against that domain
 ```
+
+The last three are blank by default and the suite never needs them — see
+[Google sign-in and the public URL](#google-sign-in-and-the-public-url).
 
 `config.generated.toml` (the grid's effective configuration for a run) and
 `videos/` are also gitignored; `config.toml` itself is tracked.
@@ -627,6 +658,86 @@ The application code does not know which is active; both go through one
 
 **Resend requires a one-time manual setup and has a constraint on the sender
 address.** Read [docs/EMAIL.md](docs/EMAIL.md) before configuring production.
+
+## Google sign-in and the public URL
+
+Artra offers "continue with Google" alongside its own sign-in. That button will
+not appear on the stack's default address, and no amount of browser
+configuration makes it: the check belongs to Google, not to the browser.
+
+Google renders the button only on an origin registered against the OAuth client,
+and it accepts only HTTPS origins and `localhost`. `http://172.19.0.9:3000` is
+neither, and it is not an address anyone can register — so the button never
+mounts, and the consent screen behind it cannot be reached at all.
+
+`public=on` gives the same stack a second front door that *is* registrable: an
+[ngrok](https://ngrok.com) tunnel on a reserved domain, in the compose project,
+on the same network as everything else.
+
+```bash
+./dev.sh public=on          # leave it up and sign in by hand
+./run.sh public=on          # or run the whole suite through it
+```
+
+```
+NGROK_DOMAIN=your-domain.ngrok-free.dev
+NGROK_AUTHTOKEN=...                      # dashboard.ngrok.com
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+```
+
+and, on that client in the Google Cloud console:
+
+| | |
+|---|---|
+| Authorised JavaScript origin | `https://$NGROK_DOMAIN` |
+| Authorised redirect URI | `https://$NGROK_DOMAIN/api/auth/google` |
+
+The domain has to be a *reserved* one rather than the random name a free tunnel
+gets by default, because it is registered with Google and compiled into the
+client bundle — it has to survive a restart of the stack.
+
+### It rebuilds, and that is not incidental
+
+`VITE_URL` is inlined into the client bundle at build time — it is what the
+sign-in button's `login_uri` is built from — so the address is not a runtime
+setting that can be flipped. Switching modes rebuilds the application image, and
+both modes cannot be served at once: a bundle built for one origin fetches its
+own API from that origin, so serving it from the other fails CORS.
+
+That is why this is a mode and not an extra port.
+
+### The tunnel's warning page
+
+A free ngrok account answers every *document* request that looks like it came
+from a browser with its own "You are about to visit…" page (`ERR_NGROK_6024`)
+instead of proxying it. Sub-resources and API calls are let through, which makes
+the failure worse than a network error: the browser lands on a perfectly healthy
+page that simply is not Artra.
+
+By hand it is one click, once. For the suite,
+[`TunnelInterstitial`](src/test/java/com/artra/e2e/base/TunnelInterstitial.java)
+pre-accepts it at session start by setting the same cookie the page's own button
+sets — plain WebDriver, so it behaves identically in all three engines, unlike
+the documented `ngrok-skip-browser-warning` header, which cannot be attached to
+a top-level navigation at all. It does nothing when the base URL is not a
+tunnel, which is every ordinary run.
+
+The cookie is `SameSite=None` deliberately: the Google flow finishes with a
+cross-site form POST from `accounts.google.com` back to `/api/auth/google`, and
+a `Lax` cookie is withheld from exactly that request — putting the warning page
+in the middle of the one navigation in the suite that cannot be retried.
+
+### What this does and does not buy
+
+It makes the Google flow *reachable* — the button renders, the consent screen
+opens, and a completed sign-in lands back on `/api/auth/google` with a
+credential the application verifies against Google's JWKS. It does not make that
+flow *automatable*: see [Known limitations](#known-limitations).
+
+Ordinary runs are unaffected. The tunnel sits in a compose profile, so nothing
+starts it and no ngrok account is needed unless the mode is asked for; the
+default path stays on the container address, with no dependency on the internet
+between the browsers and the application.
 
 ## A two-minute tour
 
@@ -678,6 +789,15 @@ Stated plainly, because a suite that hides its gaps is worse than one with gaps.
   pushes an approval over a websocket to a second, already-signed-in browser.
   It is testable — two drivers in one test — but it is a different kind of test
   from the rest of this suite and has not been built.
-- **Google sign-in is not covered.** It depends on Google's own consent screen.
+- **Google sign-in is reachable but not automated.** `public=on` serves the app
+  over HTTPS on a registrable origin, which is what makes the button render and
+  the consent screen open at all — see [Google sign-in and the public
+  URL](#google-sign-in-and-the-public-url). Driving it is a different problem:
+  the consent screen is Google's, served from Google's origin, and Google
+  actively refuses sign-in from automated browsers. Covering it would mean
+  either a test Google account with its own credentials and 2FA, or stubbing
+  Google's JWKS and minting our own ID tokens — which tests the application's
+  verification code, not the flow a user takes. The mode exists so the flow can
+  be exercised by hand and demonstrated; the assertion is not there.
 - **The suite is desktop-only.** Every session runs at 1920×1080; Artra's mobile
   navigation is a separate component and is not exercised.

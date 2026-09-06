@@ -23,7 +23,12 @@ public class ResetPasswordPage extends BasePage<ResetPasswordPage> {
 
     private static final By SUBMIT = By.cssSelector("form[role='form'] button[type='submit']");
     private static final By GLOBAL_ERROR = By.cssSelector("div[role='alert'] p");
+    /** Each password field owns its hint, and the hint doubles as that field's
+     *  error region. They were both once id="password-constraints" - a
+     *  duplicate id, so the confirm field's aria-describedby resolved to the
+     *  other field's message. */
     private static final By PASSWORD_HINT = By.id("password-constraints");
+    private static final By CONFIRM_HINT = By.id("confirm-password-constraints");
 
     /** The route's guard screen, shown when the reset_session cookie is absent
      *  or expired. */
@@ -94,10 +99,14 @@ public class ResetPasswordPage extends BasePage<ResetPasswordPage> {
         if (isPresent(GLOBAL_ERROR)) {
             return Interactions.textOf(all(GLOBAL_ERROR).get(0));
         }
-        if (isPresent(PASSWORD_HINT)) {
-            WebElement hint = all(PASSWORD_HINT).get(0);
-            if ("alert".equals(hint.getDomAttribute("role"))) {
-                return Interactions.textOf(hint);
+        for (By hintLocator : new By[] { PASSWORD_HINT, CONFIRM_HINT }) {
+            if (isPresent(hintLocator)) {
+                WebElement hint = all(hintLocator).get(0);
+                // The hint carries the rule when the field is clean and the
+                // failure when it is not; role tells the two apart.
+                if ("alert".equals(hint.getDomAttribute("role"))) {
+                    return Interactions.textOf(hint);
+                }
             }
         }
         return null;
