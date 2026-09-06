@@ -12,6 +12,9 @@
 #   ./dev.sh                                      chrome, headless
 #   ./dev.sh browsers=chrome record=chrome        record every session to video
 #   ./dev.sh browsers=chrome,firefox,edge
+#   ./dev.sh public=on                            serve the app over HTTPS through
+#                                                 an ngrok tunnel, so Google's
+#                                                 sign-in button renders
 
 set -e
 
@@ -23,22 +26,24 @@ cd "$ROOT"
 BROWSERS="chrome"
 RECORD=""
 SESSIONS=""
+PUBLIC=""
 
 for arg in "$@"; do
     case "$arg" in
         browsers=*) BROWSERS="${arg#*=}" ;;
         record=*)   RECORD="${arg#*=}" ;;
         sessions=*) SESSIONS="${arg#*=}" ;;
+        public=*)   PUBLIC="${arg#*=}" ;;
         *)
             echo "Unsupported argument: $arg"
-            echo "Usage: ./dev.sh [browsers=...] [record=...] [sessions=N]"
+            echo "Usage: ./dev.sh [browsers=...] [record=...] [sessions=N] [public=on]"
             exit 1
             ;;
     esac
 done
 
 sh "$ROOT/scripts/prepare-env.sh"
-APP_URL=$(read_env "$ROOT/.env" APP_URL)
+resolve_app_url "$PUBLIC" "$ROOT/.env"
 
 validate_browsers "$BROWSERS" "$RECORD"
 resolve_parallelism "$SESSIONS" "$RECORD"
@@ -61,6 +66,7 @@ The stack is up.
   Run one class       docker compose exec runner mvn verify -Dit.test=LandingIT
   Run one tag         docker compose exec runner mvn verify -Dgroups=smoke
 
+  Application         $APP_URL
   Grid console        http://localhost:4444  (live sessions and containers)
   Mailbox             http://localhost:8025
   Recordings          ./videos/<session-id>/<test-name>.mp4  (with record=)

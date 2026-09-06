@@ -1,9 +1,9 @@
 #!/bin/sh
 # Shared shell helpers, sourced by run.sh and dev.sh.
 #
-# Three jobs: validate what the caller asked for, decide how many browser
-# sessions this machine can sustain, and write the grid's effective
-# configuration for the run.
+# Four jobs: settle where the application is served, validate what the caller
+# asked for, decide how many browser sessions this machine can sustain, and
+# write the grid's effective configuration for the run.
 
 SUPPORTED_BROWSERS="chrome firefox edge"
 
@@ -24,6 +24,94 @@ VIDEO_IMAGE="selenium/video:ffmpeg-8.1-20260505"
 read_env() {
     [ -f "$1" ] || return 0
     sed -n "s/^$2=//p" "$1" | tail -1 | sed 's/^"//; s/"$//'
+}
+
+# ---------------------------------------------------------------------------
+# Where the application is served.
+#
+# Two modes, and the difference reaches all the way into the application image:
+# VITE_URL is inlined into the client bundle at build time, so the address is
+# not a runtime setting that can be flipped - switching modes rebuilds.
+# ---------------------------------------------------------------------------
+
+# Sets APP_URL and APP_WS_URL for the run, exports them so compose prefers them
+# over the values in .env, and adds the tunnel to STACK_SERVICES when it is
+# needed. Pass the caller's public= value and the path to .env.
+#
+# Why the mode exists at all: Google will not render its sign-in button on an
+# origin it does not recognise, and the only origins it recognises are HTTPS
+# ones and localhost. http://172.19.0.9:3000 is neither, and no amount of
+# browser configuration changes that - the check is Google's, made on Google's
+# servers against the OAuth client's registered origins. So the button never
+# appears, and the OAuth screen it opens cannot be reached.
+#
+# public=on serves the same stack through a reserved ngrok domain, which can be
+# registered with Google, and rebuilds the bundle to point at it.
+# Takes the tunnel down when the run does not want one.
+#
+# It sits in a compose profile, so an ordinary `docker compose up` neither
+# starts nor stops it - and dev.sh never calls `down`. Without this, going back
+# to the default address after a public run would leave the domain serving a
+# bundle that no longer points at it: every link and every form on the page
+# addressed to a container IP nothing outside the network can reach, from a URL
+# that is still on the public internet.
+stop_tunnel() {
+    docker compose rm --stop --force ngrok > /dev/null 2>&1 || true
+}
+
+resolve_app_url() {
+    _public=$1
+    _env_file=$2
+
+    APP_URL=$(read_env "$_env_file" APP_URL)
+    APP_WS_URL=$(read_env "$_env_file" APP_WS_URL)
+    [ -n "$APP_URL" ] || APP_URL="http://172.19.0.9:3000"
+    [ -n "$APP_WS_URL" ] || APP_WS_URL="ws://172.19.0.9:3000/ws"
+
+    case "$_public" in
+        ""|off|false|no|0)
+            stop_tunnel
+            export APP_URL APP_WS_URL
+            return 0
+            ;;
+        on|true|yes|1) ;;
+        *)
+            echo "ERROR: public= takes on or off (got '$_public')"
+            exit 1
+            ;;
+    esac
+
+    _domain=$(read_env "$_env_file" NGROK_DOMAIN)
+    _token=$(read_env "$_env_file" NGROK_AUTHTOKEN)
+    _client=$(read_env "$_env_file" GOOGLE_CLIENT_ID)
+
+    # Tolerated rather than rejected: the dashboard shows the domain as a URL,
+    # so pasting one in is the obvious mistake and it costs nothing to fix.
+    _domain=$(printf '%s' "$_domain" | sed 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#/*$##')
+
+    if [ -z "$_domain" ] || [ -z "$_token" ]; then
+        echo "ERROR: public=on needs NGROK_DOMAIN and NGROK_AUTHTOKEN in $_env_file."
+        echo ""
+        echo "  Reserve a domain (free)  https://dashboard.ngrok.com/domains"
+        echo "  Copy the authtoken       https://dashboard.ngrok.com/get-started/your-authtoken"
+        echo ""
+        echo "  NGROK_DOMAIN=your-domain.ngrok-free.dev"
+        echo "  NGROK_AUTHTOKEN=..."
+        exit 1
+    fi
+
+    # Not fatal. Everything else about the mode still works - the app is simply
+    # served over HTTPS with no sign-in button, which is a legitimate thing to
+    # want and a confusing thing to be stopped for.
+    if [ -z "$_client" ]; then
+        echo "WARN: GOOGLE_CLIENT_ID is empty in $_env_file - the app will be served"
+        echo "      publicly, but the Google sign-in button will not render."
+    fi
+
+    APP_URL="https://$_domain"
+    APP_WS_URL="wss://$_domain/ws"
+    STACK_SERVICES="$STACK_SERVICES ngrok"
+    export APP_URL APP_WS_URL
 }
 
 validate_browsers() {
@@ -283,10 +371,17 @@ announce() {
     echo " - Recording:   ${2:-none (headless)}"
     echo " - Parallelism: $3"
     echo " - Application: ${APP_URL:-http://172.19.0.9:3000}"
+    case "${APP_URL:-}" in
+        https://*) echo " - Public URL:  on (ngrok tunnel; inspector at http://localhost:4040)" ;;
+    esac
     echo ""
 }
 
 # The services the run needs. `docker compose up -d` on these pulls in postgres,
 # redis, mailpit, the app and the seed job through depends_on. The browsers are
 # NOT listed: the grid starts those itself, one container per session.
+#
+# resolve_app_url appends `ngrok` in public mode. Naming it on the command line
+# is also what activates its compose profile, so the tunnel - and the account it
+# needs - stays out of every ordinary run.
 STACK_SERVICES="runner standalone-docker"

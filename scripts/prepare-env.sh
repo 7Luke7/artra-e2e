@@ -15,7 +15,27 @@ set -e
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 ENV_FILE="$ROOT/.env"
 
+# Appends any key that a newer version of this file introduced but an existing
+# .env predates. Only ever adds - an existing value is left exactly as it is.
+ensure_key() {
+    grep -q "^$1=" "$ENV_FILE" 2>/dev/null && return 0
+    printf '%s\n' "$2" >> "$ENV_FILE"
+    echo " - added $1 to $ENV_FILE"
+}
+
+# The optional public-URL settings, which have no generated value: they name an
+# ngrok domain and an account, and stay blank until someone fills them in.
+ensure_public_keys() {
+    if ! grep -q '^NGROK_DOMAIN=\|^NGROK_AUTHTOKEN=\|^GOOGLE_CLIENT_ID=' "$ENV_FILE" 2>/dev/null; then
+        printf '\n%s\n' "# --- Public URL (optional; ./run.sh public=on) -------------------------------" >> "$ENV_FILE"
+    fi
+    ensure_key NGROK_DOMAIN     'NGROK_DOMAIN='
+    ensure_key NGROK_AUTHTOKEN  'NGROK_AUTHTOKEN='
+    ensure_key GOOGLE_CLIENT_ID 'GOOGLE_CLIENT_ID='
+}
+
 if [ -f "$ENV_FILE" ]; then
+    ensure_public_keys
     exit 0
 fi
 
@@ -56,6 +76,18 @@ IP_SECRET=$(random)
 
 EMAIL_FROM="Artra <no-reply@artra.test>"
 EMAIL_REPLY_TO=support@artra.test
+
+# --- Public URL (optional; ./run.sh public=on) -------------------------------
+# Blank by default, and the suite does not need them: they only matter for the
+# mode that serves the application over HTTPS on a public domain, which is what
+# Google's sign-in button requires. See the README.
+#
+#   NGROK_DOMAIN     a reserved ngrok domain, no scheme
+#   NGROK_AUTHTOKEN  from https://dashboard.ngrok.com/get-started/your-authtoken
+#   GOOGLE_CLIENT_ID the OAuth client whose authorised origin is that domain
+NGROK_DOMAIN=
+NGROK_AUTHTOKEN=
+GOOGLE_CLIENT_ID=
 EOF
 
 chmod 600 "$ENV_FILE"

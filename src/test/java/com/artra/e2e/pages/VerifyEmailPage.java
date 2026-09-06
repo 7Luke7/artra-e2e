@@ -3,6 +3,8 @@ package com.artra.e2e.pages;
 import java.time.Duration;
 
 import org.openqa.selenium.By;
+import org.openqa.selenium.ElementNotInteractableException;
+import org.openqa.selenium.StaleElementReferenceException;
 import org.openqa.selenium.TimeoutException;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
@@ -63,6 +65,41 @@ public class VerifyEmailPage extends BasePage<VerifyEmailPage> {
     }
 
     /**
+     * Submits, unless the screen has already submitted itself.
+     *
+     * The code field posts the form as soon as the sixth digit lands, so by the
+     * time a test reaches the button the page may be mid-navigation or gone.
+     * Clicking is still the right thing to do when the entry did not trigger it
+     * - a value set through the DOM rather than typed, or a browser that has
+     * not hydrated yet - so the click is attempted and only its absence is
+     * tolerated.
+     *
+     * The three exceptions are the three shapes that "it went without me" takes:
+     * the button was re-rendered away mid-click, it never became visible, or it
+     * was disabled while the submission was in flight.
+     */
+    private void submitUnlessAlreadySent() {
+        // Checked before looking for the button: once the form has navigated,
+        // waiting for a control that will never reappear would cost the full
+        // visibility timeout on every one of these tests before concluding
+        // what the URL already says.
+        if (!currentPath().startsWith("/verify")) {
+            return;
+        }
+
+        try {
+            WebElement button = visible(SUBMIT);
+            if (button.isEnabled()) {
+                Interactions.click(driver, button);
+            }
+        } catch (StaleElementReferenceException
+                 | TimeoutException
+                 | ElementNotInteractableException e) {
+            log.debug("The form submitted itself before the button could be clicked");
+        }
+    }
+
+    /**
      * Submits a code the app should accept and waits for it to leave this page.
      *
      * Both flows redirect to {@code /}, where the caller decides which of the
@@ -71,7 +108,7 @@ public class VerifyEmailPage extends BasePage<VerifyEmailPage> {
     public LandingPage confirm(String value) {
         log.info("▶ Confirming verification code");
         enterCode(value);
-        submit();
+        submitUnlessAlreadySent();
         try {
             new WebDriverWait(driver, OUTCOME).until(d -> !currentPath().startsWith("/verify"));
         } catch (TimeoutException e) {
@@ -85,7 +122,7 @@ public class VerifyEmailPage extends BasePage<VerifyEmailPage> {
     /** Submits a code the app should reject and waits for the message. */
     public VerifyEmailPage confirmExpectingRejection(String value) {
         enterCode(value);
-        submit();
+        submitUnlessAlreadySent();
         try {
             new WebDriverWait(driver, OUTCOME).until(d -> message() != null);
         } catch (TimeoutException e) {

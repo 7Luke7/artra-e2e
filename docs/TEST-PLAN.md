@@ -44,7 +44,7 @@ from an oversight.
 | Payment | Hands off to an external bank gateway. Automating a third party's sandbox UI is a separate piece of work with its own credentials and its own flakiness. |
 | The course player | Requires an enrolment, which requires a completed payment. Inserting the enrolment row directly would make the test pass without testing what a user does. |
 | Device-approval sign-in | The second factor's other branch pushes an approval over a websocket to an already-signed-in device. Testable with two drivers in one test; not built. |
-| Google sign-in | Depends on Google's own consent screen. |
+| Google sign-in | Reachable under `public=on`, which serves the app over HTTPS on an origin Google will render the button for; not automated, because the consent screen is Google's own and Google refuses sign-in from automated browsers. |
 | Mobile layout | Every session runs at 1920×1080. Artra's mobile navigation is a separate component. |
 | Visual regression | Out of scope for a functional suite; would need a baseline store and a separate review workflow. |
 | Load and performance | Different tooling, different environment, different question. |

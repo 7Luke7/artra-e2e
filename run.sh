@@ -12,6 +12,9 @@
 #   ./run.sh test=CourseCatalogueIT            one class
 #   ./run.sh sessions=4                        override the auto-sized parallelism
 #   ./run.sh keep=true                         leave the stack running afterwards
+#   ./run.sh public=on                         serve the app over HTTPS through
+#                                              an ngrok tunnel, so Google's
+#                                              sign-in button renders
 #
 # Requires Docker and the compose plugin. Nothing else - no JDK, no Maven and no
 # browsers on the host.
@@ -29,6 +32,7 @@ SESSIONS=""
 TAGS=""
 TEST=""
 KEEP="false"
+PUBLIC=""
 
 for arg in "$@"; do
     case "$arg" in
@@ -38,16 +42,17 @@ for arg in "$@"; do
         tags=*)     TAGS="${arg#*=}" ;;
         test=*)     TEST="${arg#*=}" ;;
         keep=*)     KEEP="${arg#*=}" ;;
+        public=*)   PUBLIC="${arg#*=}" ;;
         *)
             echo "Unsupported argument: $arg"
-            echo "Usage: ./run.sh [browsers=...] [record=...] [sessions=N] [tags=...] [test=...] [keep=true]"
+            echo "Usage: ./run.sh [browsers=...] [record=...] [sessions=N] [tags=...] [test=...] [keep=true] [public=on]"
             exit 1
             ;;
     esac
 done
 
 sh "$ROOT/scripts/prepare-env.sh"
-APP_URL=$(read_env "$ROOT/.env" APP_URL)
+resolve_app_url "$PUBLIC" "$ROOT/.env"
 
 validate_browsers "$BROWSERS" "$RECORD"
 resolve_parallelism "$SESSIONS" "$RECORD"
@@ -126,7 +131,10 @@ else
     echo "  docker compose exec runner mvn verify"
     echo "  Grid console:  http://localhost:4444"
     echo "  Mailbox:       http://localhost:8025"
-    echo "  Application:   ${APP_URL:-http://172.19.0.9:3000}  (from inside the stack)"
+    echo "  Application:   ${APP_URL:-http://172.19.0.9:3000}"
+    case "${APP_URL:-}" in
+        https://*) echo "  Tunnel:        http://localhost:4040  (requests through the public URL)" ;;
+    esac
 fi
 
 echo ""
